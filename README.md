@@ -44,6 +44,9 @@
 - [项目架构](#项目架构)
 - [API 文档](#api-文档)
 - [部署指南](#部署指南)
+  - [Docker 一键部署](#方式一docker-一键部署-推荐)
+  - [手动部署](#方式二非-docker-手动部署)
+  - [CDN 部署](#方式三cdn-部署-edgeonecloudflare)
 - [常见问题](#常见问题)
 - [贡献指南](#贡献指南)
 - [开源协议](#开源协议)
@@ -863,6 +866,127 @@ curl -X POST http://localhost:8111/api/v1/auth/login \
 
 ---
 
+### 方式三：CDN 部署 (EdgeOne/Cloudflare)
+
+如果你使用 CDN 加速前端，需要特别注意 WebSocket 和缓存配置。
+
+#### CDN 缓存配置
+
+大多数 CDN 默认会缓存所有响应，这会导致动态页面和 API 出现问题。
+
+**需要配置不缓存的路径：**
+
+| 路径 | 说明 |
+|------|------|
+| `/api/*` | 所有 API 请求 |
+| `/dashboard/*` | 仪表盘页面 |
+| `/admin/*` | 后台管理页面 |
+| `/training/*` | 训练页面 |
+| `/me/*` | 个人中心 |
+| `/vip/*` | VIP 页面 |
+| `/login`, `/register` | 登录注册页面 |
+
+**EdgeOne 配置方法：**
+1. 进入 EdgeOne 控制台 -> 站点管理 -> 规则引擎
+2. 添加规则，匹配路径 `/api/*`，操作选择"不缓存"
+3. 对其他动态路径重复上述步骤
+
+**Cloudflare 配置方法：**
+1. 进入 Cloudflare 控制台 -> 规则 -> 页面规则
+2. 添加规则 `*yourdomain.com/api/*`，设置"缓存级别"为"绕过"
+
+#### WebSocket 配置 (重要)
+
+**问题：** 大多数 CDN (如 EdgeOne、部分 Cloudflare 配置) 不支持 WebSocket 协议升级，会导致实时语音对话功能无法使用。
+
+**解决方案：创建专用 WebSocket 域名绕过 CDN**
+
+1. **创建子域名**：解析一个新域名直接指向服务器 IP（不经过 CDN）
+   ```
+   ws.yourdomain.com -> 服务器IP (A记录，不开启CDN代理)
+   ```
+
+2. **配置 Nginx 反向代理**（WebSocket 专用域名）：
+   ```nginx
+   server {
+       listen 80;
+       listen 443 ssl http2;
+       server_name ws.yourdomain.com;
+       
+       # SSL 证书配置
+       ssl_certificate /path/to/fullchain.pem;
+       ssl_certificate_key /path/to/privkey.pem;
+       
+       # WebSocket 支持
+       location / {
+           proxy_pass http://127.0.0.1:8111;
+           proxy_http_version 1.1;
+           proxy_set_header Upgrade $http_upgrade;
+           proxy_set_header Connection "upgrade";
+           proxy_set_header Host $http_host;
+           proxy_set_header X-Real-IP $remote_addr;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto $scheme;
+           
+           # WebSocket 超时设置 (10分钟)
+           proxy_connect_timeout 60s;
+           proxy_send_timeout 600s;
+           proxy_read_timeout 600s;
+       }
+   }
+   ```
+
+3. **修改前端代码**：在 `frontend/src/hooks/useRealtimeVoice.ts` 中配置 WebSocket 地址
+   ```typescript
+   // 方案1: 使用环境变量 (推荐)
+   // 在 frontend/.env.local 中添加:
+   // NEXT_PUBLIC_WS_URL=wss://ws.yourdomain.com/api/v1
+   
+   // 方案2: 硬编码域名映射 (已内置)
+   // 代码会自动检测主域名并使用对应的 WebSocket 域名
+   const hostname = window.location.hostname;
+   if (hostname === 'yourdomain.com') {
+     return 'wss://ws.yourdomain.com/api/v1';
+   }
+   ```
+
+4. **更新 CORS 配置**：在 `.env` 中添加 WebSocket 域名
+   ```bash
+   CORS_ORIGINS=https://yourdomain.com,https://ws.yourdomain.com,http://localhost:8110
+   ```
+
+5. **重新部署**：
+   ```bash
+   ./deploy.sh rebuild
+   ```
+
+#### HTTPS 配置 (麦克风权限必需)
+
+浏览器要求麦克风访问必须在安全上下文 (HTTPS) 下进行。
+
+**方案A：使用 CDN 提供的 SSL**
+- EdgeOne/Cloudflare 会自动为主域名提供 SSL
+- WebSocket 专用域名需要单独申请证书
+
+**方案B：使用 Let's Encrypt 免费证书**
+```bash
+# 安装 certbot
+apt install certbot python3-certbot-nginx
+
+# 申请证书
+certbot --nginx -d yourdomain.com -d ws.yourdomain.com
+
+# 自动续期
+certbot renew --dry-run
+```
+
+**方案C：使用宝塔面板**
+1. 进入网站管理 -> SSL
+2. 选择 Let's Encrypt 或上传自有证书
+3. 开启强制 HTTPS
+
+---
+
 ### 生产环境配置
 
 #### 环境变量配置
@@ -999,6 +1123,55 @@ WECHAT_REDIRECT_URI=https://yourdomain.com/api/v1/auth/wechat/callback
 - 生产环境必须使用 HTTPS 和已备案域名
 - 微信公众号授权需要额外配置 `WECHAT_MP_APP_ID` 和 `WECHAT_MP_APP_SECRET`
 
+### 7. CDN 导致页面缓存问题
+
+**问题**: 登录后页面没反应，刷新才显示；或者显示旧数据
+
+**原因**: CDN 缓存了动态页面
+
+**解决方案**:
+1. 在 CDN 控制台配置规则，对 `/api/*`、`/dashboard/*`、`/admin/*` 等路径不缓存
+2. 项目已在 `next.config.ts` 中配置了 `Cache-Control: no-store` 响应头
+3. 如果 CDN 忽略源站响应头，需要在 CDN 规则中强制设置
+
+### 8. WebSocket 连接失败 (错误码 1006)
+
+**问题**: 实时语音对话无法连接，控制台显示 `WebSocket connection failed: 1006`
+
+**原因**: CDN 不支持 WebSocket 协议升级
+
+**解决方案**:
+1. 创建专用子域名直接指向服务器 (不经过 CDN)
+2. 配置 Nginx 反向代理支持 WebSocket
+3. 修改前端代码使用专用 WebSocket 域名
+4. 详见 [CDN 部署](#方式三cdn-部署-edgeonecloudflare) 章节
+
+**快速排查**:
+```bash
+# 测试 WebSocket 连接 (需要安装 wscat)
+npm install -g wscat
+wscat -c "wss://ws.yourdomain.com/api/v1/ws/health"
+
+# 检查 Nginx 配置
+nginx -t
+
+# 查看后端日志
+docker-compose logs -f backend | grep -i websocket
+```
+
+### 9. 麦克风权限被拒绝
+
+**问题**: 点击语音对话提示"无法访问麦克风"
+
+**原因**: 
+- 浏览器要求麦克风访问必须在安全上下文 (HTTPS) 下
+- 用户未授权麦克风权限
+
+**解决方案**:
+1. 确保网站使用 HTTPS 访问
+2. 在浏览器设置中允许麦克风权限
+3. 开发环境 `localhost` 被视为安全上下文，无需 HTTPS
+
 ---
 
 ## 贡献指南
@@ -1082,7 +1255,7 @@ chore: 构建工具、依赖更新
 - [x] Zustand状态管理Toast队列
 - [x] Framer Motion优雅动画
 
-### v1.2 (2024-12-24 最新版本)
+### v1.2 (当前版本)
 
 **VIP会员系统**:
 - [x] VIP套餐管理 (CRUD、启用/禁用)

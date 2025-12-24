@@ -1,0 +1,100 @@
+# 销冠培养系统 & 社恐培养系统 - 生产环境
+# 使用方法: docker-compose -f docker-compose.prod.yml up -d
+
+services:
+  # PostgreSQL数据库
+  postgres:
+    image: postgres:16-alpine
+    container_name: sales_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-asp_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  # Redis缓存
+  redis:
+    image: redis:7-alpine
+    container_name: sales_redis
+    restart: always
+    command: redis-server ${REDIS_PASSWORD:+--requirepass $REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  # 后端API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: ../docker/backend.Dockerfile
+      args:
+        - USE_MIRROR=${USE_TENCENT_MIRROR:-false}
+        - PIP_MIRROR=${PIP_MIRROR:-https://mirrors.cloud.tencent.com/pypi/simple}
+    container_name: sales_backend
+    restart: always
+    ports:
+      - "8111:8111"
+    environment:
+      - APP_ENV=production
+      - DEBUG=false
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-your_secure_database_password_here}@postgres:5432/${POSTGRES_DB:-asp_db}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-your_secure_redis_password_here}@redis:6379/0
+      - JWT_SECRET=${JWT_SECRET}
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}
+      - CORS_ORIGINS=${CORS_ORIGINS:-https://xiaoguan.syhub.net}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/uploads:/app/uploads
+    networks:
+      - internal
+      - external
+
+  # 前端
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../docker/frontend.Dockerfile
+      args:
+        - USE_MIRROR=${USE_TENCENT_MIRROR:-false}
+        - NPM_MIRROR=${NPM_MIRROR:-https://mirrors.cloud.tencent.com/npm/}
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
+    container_name: sales_frontend
+    restart: always
+    ports:
+      - "8110:8110"
+    environment:
+      - NODE_ENV=production
+    depends_on:
+      - backend
+    networks:
+      - external
+
+volumes:
+  postgres_data:
+  redis_data:
+
+
+networks:
+  internal:
+    driver: bridge
+  external:
+    driver: bridge

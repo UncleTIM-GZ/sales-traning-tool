@@ -1,0 +1,85 @@
+# 销冠培养系统 & 社恐培养系统 - 开发环境
+# 
+# 端口说明 (开发环境):
+#   PostgreSQL: 宿主机 8108 -> 容器 5432
+#   Redis: 宿主机 8109 -> 容器 6379
+#
+# 连接示例:
+#   DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:8108/asp_db
+#   REDIS_URL=redis://localhost:8109/0
+
+services:
+  # PostgreSQL数据库
+  postgres:
+    image: postgres:16-alpine
+    container_name: asp_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: asp_db
+    ports:
+      - "8108:5432"  # 宿主机:容器 - 本地连接用 8108
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Redis缓存
+  redis:
+    image: redis:7-alpine
+    container_name: asp_redis
+    ports:
+      - "8109:6379"  # 宿主机:容器 - 本地连接用 8109
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+  # 后端API (开发模式使用本地运行)
+  # backend:
+  #   build:
+  #     context: ./backend
+  #     dockerfile: ../docker/backend.Dockerfile
+  #   container_name: asp_backend
+  #   ports:
+  #     - "8111:8111"
+  #   environment:
+  #     - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/asp_db
+  #     - REDIS_URL=redis://redis:6379/0
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   volumes:
+  #     - ./backend:/app
+  #   command: uvicorn app.main:app --host 0.0.0.0 --port 8111 --reload
+
+  # 前端 (开发模式使用本地运行)
+  # frontend:
+  #   build:
+  #     context: ./frontend
+  #     dockerfile: ../docker/frontend.Dockerfile
+  #   container_name: asp_frontend
+  #   ports:
+  #     - "8110:8110"
+  #   environment:
+  #     - NEXT_PUBLIC_API_URL=http://localhost:8111
+  #   volumes:
+  #     - ./frontend:/app
+  #     - /app/node_modules
+  #   command: npm run dev
+
+volumes:
+  postgres_data:
+  redis_data:
+
+
+networks:
+  default:
+    name: asp_network
